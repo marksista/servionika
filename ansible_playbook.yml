@@ -99,7 +99,7 @@
   gather_facts: false
   become: true
   tasks:
-    - name: Creates directory
+    - name: Create directory
       file:
         path: /tmp/ansible/load_web_balancer/
         state: directory
