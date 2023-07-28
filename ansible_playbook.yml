@@ -1,0 +1,163 @@
+- name: Install Docker on localhost
+  hosts: localhost
+  become: true
+  tasks:
+    - name: Install required packages for Docker
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+        state: present
+
+    - name: Add Docker repository key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu bionic stable
+        state: present
+
+    - name: Install Docker
+      apt:
+        name: docker-ce
+        state: latest
+
+    - name: Start Docker service
+      service:
+        name: docker
+        state: started
+
+- name: Create Docker network
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Create the network for container communication
+      docker_network:
+        name: balance_web_network
+        state: present
+
+- name: Create dummy interface and attach it to Docker network
+  hosts: localhost
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Load dummy kernel module
+      shell: modprobe dummy
+      ignore_errors: yes
+
+    - name: Create dummy interface
+      shell: ip link add dummy0 type dummy
+      ignore_errors: yes
+
+    - name: Assign IP address to dummy interface
+      shell: ip addr add 172.18.0.1/32 dev dummy0
+      ignore_errors: yes
+
+    - name: Activate dummy interface
+      shell: ip link set dev dummy0 up
+      ignore_errors: yes
+
+    - name: Add dummy interface to Docker network
+      docker_network:
+        name: balance_web_network
+        state: present
+
+- name: Set up iptables firewall rules
+  hosts: localhost
+  become: true
+  tasks:
+    - name: Open port 22 for SSH
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 22
+        jump: ACCEPT
+      ignore_errors: yes
+
+    - name: Open port 80 for HTTP
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 80
+        jump: ACCEPT
+      ignore_errors: yes
+
+    - name: Open port 443 for HTTPS
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 443
+        jump: ACCEPT
+      ignore_errors: yes
+
+- name: Transfer files
+  hosts: localhost
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Creates directory
+      file:
+        path: /tmp/ansible/load_web_balancer/
+        state: directory
+
+    - name: Copy all files
+      copy:
+        src: "{{ item }}"
+        dest: /tmp/ansible/load_web_balancer/
+        mode: '0644'
+      with_fileglob:
+            - "ansible/*"
+
+- name: Create and configure containers
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Pull Nginx image
+      docker_image:
+        name: nginx:latest
+        source: "pull"
+        state: present
+
+    - name: Create Nginx containers
+      docker_container:
+        name: "web{{ item }}"
+        image: nginx:latest
+        ports:
+          - "8{{ item }}:80"
+        volumes:
+            - /tmp/ansible/load_web_balancer/web{{ item }}/:/usr/share/nginx/html/
+            - /tmp/ansible/load_web_balancer/web/conf/:/etc/nginx/
+        state: started
+        networks:
+          - name: balance_web_network
+      loop:
+        - 1
+        - 2
+    - name: Pull HAproxy+keepalived image
+      docker_image:
+        name: instantlinux/haproxy-keepalived:latest
+        source: "pull"
+        state: present
+
+    - name: Create HAproxy+Keepalived containers
+      docker_container:
+        name: "haproxy_keepalived{{ item }}"
+        image: instantlinux/haproxy-keepalived:latest
+        privileged: true
+        ports:
+          - "80:80"
+        capabilities:
+          - NET_ADMIN
+        volumes:
+          - /tmp/ansible/load_web_balancer/:/usr/local/etc/haproxy.d/
+          - /tmp/ansible/load_web_balancer/keepalived{{ item }}:/etc/keepalived/
+        state: started
+        networks:
+          - name: balance_web_network
+      loop:
+        - 1
+#        - 2      -- не работает из-за попытки забиндить один и тот же порт на хосте
